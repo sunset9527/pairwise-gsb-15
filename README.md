@@ -235,6 +235,41 @@ function (event, oldState, newState) {
 
 Inside these functions, `this` refers to the internal `stateStore`.
 
+In addition to `onBefore<eventname>` and `onAfter<eventname>`, plain `onBefore`
+and `onAfter` act as wildcard hooks and are triggered for every event handled
+by the state. For each event the specific hook runs first, then the wildcard
+hook. The full notification order for a handled event is:
+
+    onBefore<event>, onBefore, <action>, onAfter<event>, onAfter, onLeave, onEnter
+
+Hook names are matched case-insensitively, but an exact case match always
+wins. If a state defines multiple hooks that only differ in casing (e.g.
+`ONENTER` and `OnEnter`) and none matches exactly, an `InvalidStateError`
+is thrown instead of picking one arbitrarily.
+
+If a hook or an action throws, the exception propagates to the caller and the
+machine is never left in an intermediate state: exceptions from `onBefore*`,
+the action, `onAfter*` or `onLeave` leave the machine in the old state, while
+the transition is already committed if `onEnter` throws.
+
+### Errors
+
+Stately.js throws a `Stately.InvalidStateError` for:
+
+* an invalid `statesObject`, an invalid state object, or a state object
+  registered under two different names,
+* an unknown `initialStateName`,
+* state names colliding with machine internals (`getMachineState`,
+  `setMachineState`, `getMachineEvents`) or event names colliding with the
+  machine API (`getMachineState`, `getMachineEvents`, `name`),
+* transitions into an unknown or invalid state, no matter if the target is
+  given as a string shorthand (`event: 'STATE'`), a returned string, a
+  returned state object or via `setMachineState()`,
+* ambiguous special event hooks (see above).
+
+An event that isn't handled in the current state is ignored and returns the
+`stateMachine` object for chaining.
+
 ## Examples
 
 ### Door

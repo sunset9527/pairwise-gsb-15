@@ -20,6 +20,8 @@
     var
         toString = Object.prototype.toString,
 
+        hasOwnProperty = Object.prototype.hasOwnProperty,
+
         InvalidStateError = (function () {
 
             function InvalidStateError(message) {
@@ -27,9 +29,14 @@
                 this.name = 'InvalidStateError';
 
                 this.message = message;
+
+                if (Error.captureStackTrace) {
+
+                    Error.captureStackTrace(this, InvalidStateError);
+                }
             }
 
-            InvalidStateError.prototype = new Error();
+            InvalidStateError.prototype = Object.create(Error.prototype);
 
             InvalidStateError.prototype.constructor = InvalidStateError;
 
@@ -48,233 +55,343 @@
             throw new InvalidStateError('Stately.js: Invalid states object: `' + statesObject + '`.');
         }
 
-        function resolveSpecialEventFn(stateName, fnName) {
-
-            for (var property in stateStore[stateName]) {
-
-                if (stateStore[stateName].hasOwnProperty(property)) {
-
-                    if (property.toLowerCase() === fnName.toLowerCase()) {
-
-                        return stateStore[stateName][property];
-
-                    }
-                }
-            }
-        }
-
         var
             currentState,
 
-            stateStore = {
+            stateStore,
 
-                getMachineState: function getMachineState() {
+            stateMachine,
 
-                    return currentState.name;
-                },
+            transition;
 
-                setMachineState: function setMachineState(nextState /*, eventName */) {
+        function hasOwn(object, property) {
 
-                    var
-                        eventName = arguments[1],
+            return hasOwnProperty.call(object, property);
+        }
 
-                        onEnterState,
+        function isSpecialEventName(eventName) {
 
-                        onLeaveState,
+            return /^onEnter$/i.test(eventName)
+                || /^onLeave$/i.test(eventName)
+                || /^onBefore/i.test(eventName)
+                || /^onAfter/i.test(eventName);
+        }
 
-                        lastState = currentState;
+        function getStateByName(stateName) {
 
-                    if (typeof nextState === 'string') {
+            var state = hasOwn(stateStore, stateName) ? stateStore[stateName] : undefined;
 
-                        nextState = stateStore[nextState];
+            return toString.call(state) === '[object Object]' ? state : undefined;
+        }
 
+        function isStateObject(object) {
+
+            return toString.call(object) === '[object Object]'
+                && typeof object.name === 'string'
+                && hasOwn(stateStore, object.name)
+                && stateStore[object.name] === object;
+        }
+
+        function invalidStateError(value) {
+
+            return new InvalidStateError('Stately.js: Transitioned into invalid state: `'
+                + (typeof value === 'string' ? value : (value && value.name ? value.name : value)) + '`.');
+        }
+
+        function resolveSpecialEventFn(stateName, fnName) {
+
+            var
+                state = stateStore[stateName],
+
+                fallback,
+
+                fallbackCount = 0;
+
+            for (var property in state) {
+
+                if (hasOwn(state, property)) {
+
+                    if (property === fnName) {
+
+                        return state[property];
                     }
 
-                    if (!nextState || !nextState.name || !stateStore[nextState.name]) {
+                    if (property.toLowerCase() === fnName.toLowerCase()) {
 
-                        throw new InvalidStateError('Stately.js: Transitioned into invalid state: `' + setMachineState.caller + '`.');
+                        fallback = state[property];
+
+                        fallbackCount++;
                     }
+                }
+            }
 
-                    currentState = nextState;
+            if (fallbackCount > 1) {
 
-                    onLeaveState = resolveSpecialEventFn(lastState.name, "onLeave");
+                throw new InvalidStateError('Stately.js: Ambiguous special event function: `' + fnName + '` in state `' + stateName + '`.');
+            }
 
-                    if (onLeaveState && typeof onLeaveState === 'function' && lastState.name != currentState.name) {
+            return fallback;
+        }
 
-                        onLeaveState.call(stateStore, eventName, lastState.name, currentState.name);
-                    }
+        function callSpecialEventFn(stateName, fnName, eventName, oldStateName, newStateName) {
 
-                    onEnterState = resolveSpecialEventFn(currentState.name, "onEnter");
+            var fn = resolveSpecialEventFn(stateName, fnName);
 
-                    if (onEnterState && typeof onEnterState === 'function' && lastState.name != nextState.name) {
+            if (typeof fn === 'function') {
 
-                        onEnterState.call(stateStore, eventName, lastState.name, nextState.name);
-                    }
+                fn.call(stateStore, eventName, oldStateName, newStateName);
+            }
+        }
 
-                    return this;
-                },
+        stateStore = {
 
-                getMachineEvents: function getMachineEvents() {
+            getMachineState: function getMachineState() {
 
-                    var events = [];
+                return currentState.name;
+            },
 
-                    for (var property in currentState) {
+            setMachineState: function setMachineState(nextState /*, eventName */) {
 
-                        if (currentState.hasOwnProperty(property)) {
+                var
+                    eventName = arguments[1],
 
-                            if (typeof currentState[property] === 'function') {
+                    lastState = currentState,
 
-                                events.push(property);
-                            }
-                        }
-                    }
+                    targetState = nextState;
 
-                    return events;
+                if (typeof targetState === 'string') {
+
+                    targetState = getStateByName(targetState);
                 }
 
+                if (!isStateObject(targetState)) {
+
+                    throw invalidStateError(nextState);
+                }
+
+                if (lastState === targetState) {
+
+                    return this;
+                }
+
+                callSpecialEventFn(lastState.name, 'onLeave', eventName, lastState.name, targetState.name);
+
+                currentState = targetState;
+
+                callSpecialEventFn(targetState.name, 'onEnter', eventName, lastState.name, targetState.name);
+
+                return this;
             },
 
-            stateMachine = {
+            getMachineEvents: function getMachineEvents() {
 
-                getMachineState: stateStore.getMachineState,
+                var events = [];
 
-                getMachineEvents: stateStore.getMachineEvents
+                for (var property in currentState) {
 
-            },
+                    if (hasOwn(currentState, property)
+                        && typeof currentState[property] === 'function'
+                        && !isSpecialEventName(property)) {
 
-            transition = function transition(stateName, eventName, nextEvent) {
+                        events.push(property);
+                    }
+                }
 
-                return function event() {
+                return events;
+            }
 
-                    var args = [];
-                    for (var _i = 0; _i < arguments.length; _i++) {
-                        args[_i] = arguments[_i];
+        };
+
+        stateMachine = {
+
+            getMachineState: stateStore.getMachineState,
+
+            getMachineEvents: stateStore.getMachineEvents
+
+        };
+
+        transition = function transition(stateName, eventName, nextEvent) {
+
+            return function event() {
+
+                var args = [];
+                for (var _i = 0; _i < arguments.length; _i++) {
+                    args[_i] = arguments[_i];
+                }
+
+                var
+                    nextState,
+
+                    transitionTarget,
+
+                    result,
+
+                    eventValue = stateMachine;
+
+                if (stateStore[stateName] !== currentState) {
+
+                    if (nextEvent) {
+
+                        eventValue = nextEvent.apply(stateStore, args);
                     }
 
-                    var
-                        onBeforeEvent,
+                    return eventValue;
+                }
 
-                        onAfterEvent,
+                var oldStateName = currentState.name;
 
-                        nextState,
+                callSpecialEventFn(oldStateName, 'onBefore' + eventName, eventName, oldStateName, oldStateName);
 
-                        eventValue = stateMachine;
+                callSpecialEventFn(oldStateName, 'onBefore', eventName, oldStateName, oldStateName);
 
-                    if (stateStore[stateName] !== currentState) {
+                eventValue = stateStore[stateName][eventName].apply(stateStore, args);
 
-                        if (nextEvent) {
+                if (typeof eventValue === 'undefined' || eventValue === null) {
 
-                            eventValue = nextEvent.apply(stateStore, args);
-                        }
+                    nextState = currentState;
 
-                        return eventValue;
-                    }
+                    eventValue = stateMachine;
 
-                    onBeforeEvent = resolveSpecialEventFn(currentState.name, "onBefore" + eventName);
+                } else if (typeof eventValue === 'string') {
 
-                    if (onBeforeEvent && typeof onBeforeEvent === 'function') {
+                    transitionTarget = eventValue;
 
-                        onBeforeEvent.call(stateStore, eventName, currentState.name, currentState.name);
-                    }
+                    nextState = getStateByName(eventValue);
 
-                    eventValue = stateStore[stateName][eventName].apply(stateStore, args);
+                    eventValue = stateMachine;
 
-                    if (typeof eventValue === 'undefined') {
+                } else if (toString.call(eventValue) === '[object Array]') {
+
+                    result = eventValue;
+
+                    transitionTarget = result[0];
+
+                    if (typeof result[0] === 'undefined' || result[0] === null) {
 
                         nextState = currentState;
 
-                        eventValue = stateMachine;
+                    } else if (typeof result[0] === 'string') {
 
-                    } else if (typeof eventValue === 'string') {
+                        nextState = getStateByName(result[0]);
 
-                        nextState = stateStore[eventValue];
+                    } else {
 
-                        eventValue = stateMachine;
-
-                    } else if (eventValue.constructor === Array) {
-
-                        if (typeof eventValue[0] === 'undefined') {
-
-                            nextState = currentState;
-
-                        } else if (typeof eventValue[0] === 'string') {
-
-                            nextState = stateStore[eventValue[0]];
-
-                        } else {
-
-                            nextState = eventValue[0];
-
-                        }
-
-                        eventValue = eventValue[1] || stateMachine;
-
-                    } else if (toString.call(eventValue) === '[object Object]') {
-
-                        nextState = (eventValue === stateStore ? currentState : eventValue);
-
-                        eventValue = stateMachine;
-
+                        nextState = result[0];
                     }
 
-                    onAfterEvent = resolveSpecialEventFn(currentState.name, "onAfter" + eventName);
+                    eventValue = typeof result[1] === 'undefined' ? stateMachine : result[1];
 
-                    if (onAfterEvent && typeof onAfterEvent === 'function') {
+                } else if (toString.call(eventValue) === '[object Object]') {
 
-                        onAfterEvent.call(stateStore, eventName, currentState.name, nextState.name);
-                    }
+                    nextState = (eventValue === stateStore ? currentState : eventValue);
 
-                    stateStore.setMachineState(nextState, eventName);
+                    transitionTarget = nextState;
 
-                    return eventValue;
-                };
+                    eventValue = stateMachine;
+
+                } else {
+
+                    throw new InvalidStateError('Stately.js: Event `' + eventName + '` in state `' + stateName + '` returned an invalid transition value: `' + eventValue + '`.');
+                }
+
+                if (!isStateObject(nextState)) {
+
+                    throw invalidStateError(transitionTarget);
+                }
+
+                callSpecialEventFn(oldStateName, 'onAfter' + eventName, eventName, oldStateName, nextState.name);
+
+                callSpecialEventFn(oldStateName, 'onAfter', eventName, oldStateName, nextState.name);
+
+                stateStore.setMachineState(nextState, eventName);
+
+                return eventValue;
             };
+        };
+
+        var seenStateObjects = [];
 
         for (var stateName in statesObject) {
 
-            if (statesObject.hasOwnProperty(stateName)) {
+            if (hasOwn(statesObject, stateName)) {
 
-                stateStore[stateName] = statesObject[stateName];
+                if (hasOwn(stateStore, stateName)) {
 
-                for (var eventName in stateStore[stateName]) {
+                    throw new InvalidStateError('Stately.js: Invalid state name: `' + stateName + '` is reserved.');
+                }
 
-                    if (stateStore[stateName].hasOwnProperty(eventName)) {
+                var stateObject = statesObject[stateName];
 
-                        if (typeof stateStore[stateName][eventName] === 'string') {
+                if (toString.call(stateObject) !== '[object Object]') {
 
-                            stateStore[stateName][eventName] = (function (stateName) {
+                    throw new InvalidStateError('Stately.js: Invalid state object: `' + stateName + '`.');
+                }
+
+                if (seenStateObjects.indexOf(stateObject) !== -1) {
+
+                    throw new InvalidStateError('Stately.js: Duplicate state object: `' + stateName + '`.');
+                }
+
+                seenStateObjects.push(stateObject);
+
+                stateStore[stateName] = stateObject;
+
+                for (var eventName in stateObject) {
+
+                    if (hasOwn(stateObject, eventName)) {
+
+                        if (typeof stateObject[eventName] === 'string') {
+
+                            stateObject[eventName] = (function (targetStateName) {
 
                                 return function event() {
 
-                                    return this[stateName];
+                                    return targetStateName;
                                 };
 
-                            })(stateStore[stateName][eventName]);
+                            })(stateObject[eventName]);
                         }
 
-                        if (
-                            typeof stateStore[stateName][eventName] === 'function'
-                                && !/^onEnter$/i.test(eventName)
-                                && !/^onLeave$/i.test(eventName)
-                                && !/^onBefore/i.test(eventName)
-                                && !/^onAfter/i.test(eventName)
-                        ) {
+                        if (typeof stateObject[eventName] === 'function'
+                            && !isSpecialEventName(eventName)) {
 
-                            stateMachine[eventName] = transition(stateName, eventName, stateMachine[eventName]);
+                            if (eventName === 'getMachineState'
+                                || eventName === 'getMachineEvents'
+                                || eventName === 'name') {
+
+                                throw new InvalidStateError('Stately.js: Invalid event name: `' + eventName + '` is reserved.');
+                            }
+
+                            stateMachine[eventName] = transition(
+                                stateName,
+                                eventName,
+                                hasOwn(stateMachine, eventName) ? stateMachine[eventName] : undefined
+                            );
                         }
                     }
                 }
 
-                stateStore[stateName].name = stateName;
+                stateObject.name = stateName;
+
+                if (stateObject.name !== stateName) {
+
+                    throw new InvalidStateError('Stately.js: Unable to attach state name to state: `' + stateName + '`.');
+                }
 
                 if (!currentState) {
 
-                    currentState = stateStore[stateName];
+                    currentState = stateObject;
                 }
             }
         }
 
-        if (typeof stateStore[initialStateName] !== 'undefined') {
+        if (typeof initialStateName !== 'undefined') {
+
+            if (!hasOwn(statesObject, initialStateName)) {
+
+                throw new InvalidStateError('Stately.js: Invalid initial state: `' + initialStateName + '`.');
+            }
+
             currentState = stateStore[initialStateName];
         }
 
